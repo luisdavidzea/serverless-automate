@@ -1,0 +1,287 @@
+variables:
+- group: Artifactory
+#- group: Credentials-Layer-Prisma
+- group: Fluid  
+# Propiedad del sonarQube para indicar el directorio a analizar
+- name: sonarSources
+  value: '$(System.DefaultWorkingDirectory)/src' 
+# propiedad de sonarQube para indicar los directorios a excluir en el análisis
+- name: sonarExclusions
+  value: './venv/**, $(System.DefaultWorkingDirectory)/*.bin, coverage/**, test/**, **/*.txt, lib/**'
+# propiedad de sonarQube para indicar el directorio donde se encontrara el reporte de covertura
+- name: sonarCoveragePaths 
+  value: '$(Build.Repository.Name)/coverage.xml'
+# Nombre del service connection para tarea de sonarQube
+- name: sonarQubeServiceEndpoint 
+  value: 'SonarLts' 
+# Nombre del proyecto en SonarQube
+- name: sonarProjectName  
+  value: '$(Build.Repository.Name)' 
+# nombre del script de pruebas unitarias
+- name: unitTestCommand
+  value: '' 
+# ruta sonde se localiza el archivo de dependencias
+- name: path_dependencies_file
+  value: '$(System.DefaultWorkingDirectory)/requirements.txt' 
+# secretKey de proyecto en fluid asserts
+- name: secretFluid
+  value: $(tokenCanas)
+# opcional
+- name: installLZ
+  value: false
+# opcional
+- name: makeFile
+  value: false
+# Versión que se descargará en el agente temporalmente
+- name: versionPython
+  value: '3.10'
+
+trigger:
+  #- master
+  #- develop
+  #- release
+  - feature/dev
+
+# pool:
+#   name: 'Banistmo-Linux-Pool'
+
+name: $(date:yyyyMMdd)$(rev:.r)
+
+jobs:
+- job: Pruebas_Sast
+  pool: 
+    name: Banistmo-Linux-Pool
+  workspace:
+    clean: all
+  steps:
+  - script: |
+        #!/bin/sh 
+        if [ "${{ variables.secretfluid }}" = "" ]; then
+          echo "En el pipeline de CI debe diligenciar la variable 'secretFluid'."
+          echo "Wiki: https://dev.azure.com.mcas.ms/banistmo/VP%20Servicios%20Corporativos/_wiki/wikis/VP-Servicios-Corporativos.wiki/9760/1.3.10-Variables-y-variables-de-grupo-en-pipeline-de-CI"
+          exit -1
+        fi  
+
+        if [[ "$(artifactory.viewer.user)" = "" ]] || [[ "$(artifactory.viewer.psw)" = ""  ]]; then
+          echo "En el pipeline de CI debe agregar la variable de grupo correspondiente a artifactory."
+          echo "Wiki: https://dev.azure.com.mcas.ms/banistmo/VP%20Servicios%20Corporativos/_wiki/wikis/VP-Servicios-Corporativos.wiki/9760/1.3.10-Variables-y-variables-de-grupo-en-pipeline-de-CI"
+          exit -1
+        fi
+
+        if [ $(Build.Repository.Name) == "bipcld0210000-ms-account-ips-itnl-transfer-itf" ]; then
+          echo "##vso[task.setvariable variable=STRICT;]--lax"
+        else
+          if [ $(Build.SourceBranchName) == "master" ] || [ $(Build.SourceBranchName) == "release" ] || [[ $(Build.SourceBranch) =~ "release"['/'][A-Za-z0-9] ]]; then
+            echo "##vso[task.setvariable variable=STRICT;]--strict"
+          else 
+            echo "##vso[task.setvariable variable=STRICT;]--lax"
+          fi
+        fi
+
+    displayName: 'Configurando análisis para prueba de seguridad'
+
+  - bash: |
+      echo Nombre branch $(Build.SourceBranchName) 
+      echo Romper build $STRICT
+      echo Repositorio a validar $(Build.Repository.Name)
+    
+      docker login -u $(artifactory.viewer.user) -p $(artifactory.viewer.psw) banistmorepo-devops.jfrog.io
+      docker pull banistmorepo-devops.jfrog.io/fluidattacks/forces:new 
+      docker run --rm banistmorepo-devops.jfrog.io/fluidattacks/forces:new forces --static $STRICT --token ${{ variables.secretfluid }} --repo-name $(Build.Repository.Name)
+
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    displayName: 'Ejecutando pruebas de seguridad - SAST'
+    enabled: true
+- job: CI
+  pool: 
+    name: Banistmo-Linux-Pool
+  workspace:
+    clean: all
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: ${{ variables.versionPython }}
+      addToPath: true
+
+  - script: |
+      #!/bin/sh
+      echo "****************************************************"
+      echo "Prerequisitos de configuracion requierement.txt artifactory"
+      echo "1. Tener el grupo variables artifactory de desarrollo: - group: artifactory"
+      echo "2. Modelo gitflow o trunk based development"
+      echo "3. PR Target Branch permitidos: develop, release, release/*, master, trunk"
+      echo "4. Build Source Branch Name permitidos: develop, release, release/*, feature/*, hotfix/*, bugfix/* y 'merge' en pullrequest"
+      echo "****************************************************"
+
+      echo $(artifactory.viewer.user)
+      echo $(artifactory.viewer.psw)
+      echo  "BUILD QUEUED BY: "$(Build.QueuedBy)
+      myPullTargetBranch=""
+      myPullSourceBranch=""
+      mySourceBranchName=$(Build.SourceBranchName)
+      mySourceBranch=$(Build.SourceBranch)
+
+      if [[ "$(Build.QueuedBy)" == "Microsoft.VisualStudio.Services.TFS" ]] || [[ "$(Build.SourceBranchName)" == "merge"  ]]; then
+        myPullTargetBranch=$(System.PullRequest.TargetBranch)
+        myPullSourceBranch=$(System.PullRequest.SourceBranch)
+      fi
+
+      echo "PR Target Branch: " $myPullTargetBranch
+      echo "PR Source Branch: " $myPullSourceBranch
+      echo "Build Source Branch Name: " $mySourceBranchName
+      echo "Build Source Branch: " $mySourceBranch
+
+      if [ "$(Build.QueuedBy)" == "Microsoft.VisualStudio.Services.TFS" ]; then
+        echo "PULL REQUEST BUILD" 
+        if [[ "$myPullTargetBranch" == "refs/heads/master" ]] || [[ "$mySourceBranchName" == "master" ]] || [[ "$myPullTargetBranch" == "refs/heads/trunk" ]] || [[ "$mySourceBranchName" == "trunk" ]]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-prod-virtual/simple' ${{ variables.path_dependencies_file }}
+        elif [[ $myPullTargetBranch == "refs/heads/develop" ]] || [ $mySourceBranchName == "develop" ]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-dev-virtual/simple' ${{ variables.path_dependencies_file }}
+        elif [[ $myPullTargetBranch == "refs/heads/release" ]] || [[ $myPullTargetBranch =~ "release"['/'][A-Za-z0-9] ]] || [[ "release/"$mySourceBranchName =~ "release"['/'][A-Za-z0-9] ]] || [[ $(Build.SourceBranch) == "refs/heads/release" ]]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-qa-virtual/simple' ${{ variables.path_dependencies_file }}
+
+        fi
+      else
+        echo "SOURCE BRANCH MANUAL BUILD"
+        if [ $mySourceBranchName == "master" ] || [[ $mySourceBranchName == "trunk" ]] || [[ $mySourceBranchName == "hotfix" ]] || [[ $mySourceBranch =~ "hotfix"['/'][A-Za-z0-9] ]] || [[ ( ($mySourceBranchName == "merge" ) && ($myPullTargetBranch == "refs/heads/master") ) ]] || [[ ( ($mySourceBranchName == "merge" ) && ($myPullTargetBranch == "refs/heads/trunk") ) ]]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-prod-virtual/simple' ${{ variables.path_dependencies_file }}
+        elif [ $mySourceBranchName == "release" ] || [[ $mySourceBranch =~ "release"['/'][A-Za-z0-9] ]] || [[ $mySourceBranch =~ "bugfix"['/'][A-Za-z0-9] ]] || [[ ( ($mySourceBranchName == "merge" ) && ($myPullTargetBranch == "refs/heads/release") ) ]] || [[ ( ($mySourceBranchName == "merge" ) && ($myPullTargetBranch =~ "release"['/'][A-Za-z0-9]) ) ]]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-qa-virtual/simple' ${{ variables.path_dependencies_file }}
+        elif [ $mySourceBranchName == "develop" ] || [[ $mySourceBranch =~ "feature"['/'][A-Za-z0-9] ]] || [[ ( ($mySourceBranchName == "merge" ) && ($myPullTargetBranch == "refs/heads/develop") ) ]]; then
+          sed -i '1 i\--index-url https://$(artifactory.viewer.user):$(artifactory.viewer.psw)@banistmorepo.jfrog.io/artifactory/api/pypi/pypi-dev-virtual/simple' ${{ variables.path_dependencies_file }}
+        fi
+      fi
+
+      cat ${{ variables.path_dependencies_file }}
+      
+    displayName: 'Configurando requirement'
+  
+  - bash: |
+       pip3 install virtualenv --user    
+       python3 -m virtualenv venv
+       source venv/bin/activate
+       pip3 install --upgrade pip 
+       pip3 install -r ${{ variables.path_dependencies_file }}
+    displayName: 'Create virtualenv, active and install'
+
+  - bash: |
+        source venv/bin/activate  
+        echo ${{ variables.unitTestCommand }} 
+        ${{ variables.unitTestCommand }}
+    displayName: 'Run Test'
+
+  - bash: |
+        deactivate
+        rm -r venv/bin/activate
+        rm -rf venv/*
+        cd ./src
+        python3 setup.py bdist_egg
+        rm -r ./build
+    displayName: 'Generate Python commons artifacts'
+    enabled: ${{ variables.installLZ }} 
+
+  - script: |
+        #!/bin/sh  
+        LIST=$(curl -sX GET -u bbffa728d1273bb640c647ab1109d659f8a8ab64: http://sonarqube-application-balancer-466515221.us-east-1.elb.amazonaws.com/api/projects/search?projects=${{ variables.sonarProjectName }})
+        echo "***********1"
+        echo "$LIST"
+        SOURCE='{"paging":{"pageIndex":1,"pageSize":100,"total":0}'
+        if echo "$LIST" | grep -q "$SOURCE"; then
+          echo "se crea con rama master=1";
+          echo "##vso[task.setvariable variable=SONARBRANCHMASTER;]1"  
+        else
+          echo "no se crea con rama master=0";
+          echo "##vso[task.setvariable variable=SONARBRANCHMASTER;]0"
+        fi
+        echo "$SONARBRANCHMASTER"
+    displayName: 'Identificación de Sonar Branch'
+
+  - script: |
+      #!/bin/sh
+
+      echo "Configuramos la rama que subiremos a SonarQube"
+      if [[  $SONARBRANCHMASTER == "1" ]]; then
+        echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=master"
+        echo "sonar.branch.name=master"
+      else
+        echo "trigger pullrequest"
+        echo $(System.PullRequest.TargetBranch)
+        if [[ $(System.PullRequest.TargetBranch) =~ [A-Za-z0-9]['/']"develop" ]]; then
+          echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=develop"
+          echo "sonar.branch.name=develop"
+        elif [[ $(System.PullRequest.TargetBranch) =~ [A-Za-z0-9]['/']"release" ]]; then
+          echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=release"
+          echo "sonar.branch.name=release"
+        elif [[ $(System.PullRequest.TargetBranch) =~ [A-Za-z0-9]['/']"master" ]]; then
+          echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=master"
+          echo "sonar.branch.name=master"
+        elif [[ $(Build.SourceBranch) =~ "release"['/'][A-Za-z0-9] ]]; then
+          echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=$(Build.SourceBranchName)"
+          echo "sonar.branch.name=$(Build.SourceBranchName)"
+        else
+          echo "##vso[task.setvariable variable=SONAR_BRANCH_NAME;]sonar.branch.name=$(Build.SourceBranchName)"
+          echo "sonar.branch.name= " $(Build.SourceBranchName)
+        fi
+      fi
+
+    displayName: 'Configurando variables de ramas de sonarQube'
+    enabled: true
+
+  - task: SonarQubePrepare@4
+    inputs:
+      SonarQube: '${{ variables.sonarQubeServiceEndpoint }}'
+      scannerMode: 'CLI'
+      configMode: 'manual'
+      cliProjectKey: ${{ variables.sonarProjectName }}
+      cliProjectName: ${{ variables.sonarProjectName }}
+      cliProjectVersion: '$(Build.BuildNumber)'
+      cliSources: '.'
+      extraProperties: |
+        sonar.python.coverage.reportPaths= ${{ variables.sonarCoveragePaths }}
+        sonar.sources= ${{ variables.sonarSources }}
+        sonar.test= ${{ variables.sonarTest }}
+        sonar.exclusions= ${{ variables.sonarExclusions }}
+        $(SONAR_BRANCH_NAME)
+
+  - task: SonarQubeAnalyze@4
+    displayName: 'Ejecutando análisis estático de código'
+    
+  - task: sonar-buildbreaker@8
+    inputs:
+      SonarQube: '${{ variables.sonarQubeServiceEndpoint }}'
+
+  - script: |
+      python src/main.py
+    env:
+      PRISMA_ACCESS_KEY: $(PRISMA_ACCESS_KEY)
+      PRISMA_SECRET_KEY: $(PRISMA_SECRET_KEY)
+      RUNTIME: $(RUNTIME)
+      PROVIDER: $(PROVIDER)
+      OUTPUT_FILE: $(OUTPUT_FILE)
+      AWS_ACCESS_KEY: $(AWS_ACCESS_KEY)
+      AWS_SECRET_KEY: $(AWS_SECRET_KEY)
+      AWS_REGION: $(AWS_REGION)
+      ASSUME_ROLE_ARN: $(ASSUME_ROLE_ARN)
+      LAYER_NAME: $(LAYER_NAME)
+    displayName: 'Ejecutar main.py'
+  
+  # - task: ArchiveFiles@2
+  #   inputs:
+  #     rootFolderOrFile: '$(Build.Repository.LocalPath)'
+  #     archiveType: 'zip'
+  #     archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+  #   displayName: 'Archive $(Build.Repository.LocalPath)'
+
+  - bash: |
+        ls -a
+        pwd
+    displayName: 'Display Repo'
+    enabled: ${{ variables.installLZ }}
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publicando artefacto'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/twistlock_defender_layer.zip'
+      ArtifactName: artifact
+
+
